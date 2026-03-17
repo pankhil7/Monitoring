@@ -24,6 +24,8 @@ from src.admin.api import router as admin_router
 from src.alerting.alerting_runner import AlertingRunner
 from src.alerting.alerting_state import AlertingState
 from src.aggregation.runner import AggregationRunner
+from src.health.checker import HealthChecker
+from src.admin.health_check_api import router as health_check_admin_router
 from src.ingestion.api import router as ingestion_router
 from src.store.event_store import EventStore
 from src.store.rules_store import RulesStore
@@ -73,8 +75,12 @@ def create_app() -> FastAPI:
     # ── Routes ────────────────────────────────────────────────────────────────
     app.include_router(ingestion_router)
     app.include_router(admin_router)
+    app.include_router(health_check_admin_router)
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
+
+    health_checker = HealthChecker(db_path=settings.DATABASE_PATH)
+    app.state.health_checker = health_checker
 
     def pipeline_tick() -> None:
         """One tick: aggregate → detect patterns → alert."""
@@ -84,6 +90,15 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logger.exception("Pipeline tick failed: %s", exc)
 
+    def health_check_tick() -> None:
+        """Poll all registered service health endpoints → alert on failures."""
+        try:
+            alert_events = health_checker.run()
+            if alert_events:
+                alerting_runner.run(alert_events)
+        except Exception as exc:
+            logger.exception("Health check tick failed: %s", exc)
+
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
         pipeline_tick,
@@ -92,15 +107,24 @@ def create_app() -> FastAPI:
         id="aggregation_pipeline",
         replace_existing=True,
     )
+    scheduler.add_job(
+        health_check_tick,
+        trigger="interval",
+        seconds=settings.HEALTH_CHECK_INTERVAL_SECONDS,
+        id="health_check",
+        replace_existing=True,
+    )
 
     @app.on_event("startup")
     async def startup() -> None:
         scheduler.start()
         logger.info(
             "Monitoring system started. "
-            "Pipeline runs every %ds. Window: %d min.",
+            "Pipeline runs every %ds. Window: %d min. "
+            "Health checks every %ds.",
             settings.AGGREGATION_INTERVAL_SECONDS,
             settings.AGGREGATION_WINDOW_MINUTES,
+            settings.HEALTH_CHECK_INTERVAL_SECONDS,
         )
 
     @app.on_event("shutdown")

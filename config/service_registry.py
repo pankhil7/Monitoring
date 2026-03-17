@@ -40,6 +40,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "atlas-api": {
         "criticality": P0,
         "description": "Core Atlas reporting and advisor API",
+        "health_check_url": "http://atlas-api/health",
         "rules": {
             "high_frequency_threshold": 20,
             "spike_ratio_threshold": 2.0,
@@ -71,6 +72,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "advisor-api": {
         "criticality": P0,
         "description": "Advisor-facing REST API",
+        "health_check_url": "http://advisor-api/health",
         "rules": {
             "high_frequency_threshold": 15,
             "spike_ratio_threshold": 2.5,
@@ -83,6 +85,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "report-pipeline": {
         "criticality": P0,
         "description": "LLM-powered report generation pipeline",
+        "health_check_url": "http://report-pipeline/health",
         "rules": {
             "high_frequency_threshold": 10,
             "spike_ratio_threshold": 2.0,
@@ -94,6 +97,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "chat-pipeline": {
         "criticality": P0,
         "description": "Real-time chat AI pipeline",
+        "health_check_url": "http://chat-pipeline/health",
         "rules": {
             "high_frequency_threshold": 15,
             "repeated_identical_min_count": 5,
@@ -105,6 +109,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "chat-websocket": {
         "criticality": P0,
         "description": "WebSocket service for real-time chat",
+        "health_check_url": "http://chat-websocket/health",
         "rules": {
             "high_frequency_threshold": 20,
             "spike_ratio_threshold": 3.0,
@@ -115,6 +120,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "notification-sse": {
         "criticality": P1,
         "description": "SSE service for push notifications",
+        "health_check_url": "http://notification-sse/health",
         "rules": {
             "high_frequency_threshold": 30,
             "spike_ratio_threshold": 3.0,
@@ -126,6 +132,7 @@ SERVICE_REGISTRY: dict[str, dict] = {
     "report-generation-job": {
         "criticality": P0,   # P0 override: required for report generation feature
         "description": "Background job: generates scheduled reports",
+        "health_check_url": "http://report-generation-job/health",
         "rules": {
             "high_frequency_threshold": 5,
             "repeated_identical_min_count": 2,
@@ -207,6 +214,27 @@ def get_criticality(service: str, endpoint: Optional[str] = None) -> str:
         if "criticality" in ep:
             return ep["criticality"]
     return svc.get("criticality", DEFAULT_CRITICALITY)
+
+
+def get_health_check_url(service: str) -> Optional[str]:
+    """Return the configured health-check URL for a service, or None if not set."""
+    return SERVICE_REGISTRY.get(service, {}).get("health_check_url")
+
+
+def get_all_health_check_targets() -> list[dict]:
+    """
+    Return all services that have a health_check_url configured.
+    Each entry: { service, health_check_url, criticality }
+    """
+    return [
+        {
+            "service": name,
+            "health_check_url": data["health_check_url"],
+            "criticality": data.get("criticality", DEFAULT_CRITICALITY),
+        }
+        for name, data in SERVICE_REGISTRY.items()
+        if data.get("health_check_url")
+    ]
 
 
 def get_rules(service: str, endpoint: Optional[str] = None) -> dict:

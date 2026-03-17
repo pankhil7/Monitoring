@@ -16,6 +16,7 @@ class PatternType(str, Enum):
     SPIKE = "spike"
     POTENTIAL_OUTAGE = "potential_outage"
     FAILURE_RATIO = "failure_ratio"
+    SERVICE_UNREACHABLE = "service_unreachable"  # heartbeat went silent
 
 
 class AlertEventType(str, Enum):

@@ -10,12 +10,12 @@ A prototype monitoring system for AdvisoryAI that captures errors from multiple 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            EXTERNAL SOURCES                                  │
 │  APIs (P0)  │  AI Pipelines (P0)  │  WebSocket/SSE (P0/P1)  │  Jobs (P1/P2) │
-└──────────────────────────────┬──────────────────────────────────────────────┘
-                               │  POST /errors
-                               │  Headers: X-Client-Type, X-Field-Map (optional)
-                               │  Body:  { service, endpoint?, message, timestamp }
-                               │         (no severity — derived internally)
-                               ▼
+└──────────────────────────┬─────────────────────────────────────────────────┘
+                           │  POST /errors
+                           │  Headers: X-Client-Type, X-Field-Map (optional)
+                           │  Body: { service, endpoint?, message, timestamp }
+                           │        (no severity — derived internally)
+                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            INGESTION LAYER                                   │
 │                                                                             │
@@ -32,7 +32,6 @@ A prototype monitoring system for AdvisoryAI that captures errors from multiple 
 │                                  │  (schema, timestamp│                    │
 │                                  │   service name)    │                    │
 │                                  └─────────┬──────────┘                    │
-│                                            │                               │
 │                                            ▼                               │
 │                                  ┌────────────────────┐                    │
 │                                  │  EventStore        │                    │
@@ -40,46 +39,48 @@ A prototype monitoring system for AdvisoryAI that captures errors from multiple 
 │                                  │  events table      │                    │
 │                                  └────────────────────┘                    │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                            │ read events (last N minutes)
-                                            │
-                           ┌────────────────┘
-                           │  APScheduler fires every 60s
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      AGGREGATION & PROCESSING LAYER                          │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Aggregator                                                          │   │
-│  │  • Service-level  → (service, window)          → count, rate        │   │
-│  │  • Endpoint-level → (service, endpoint, window) → count, rate       │   │
-│  └───────────────────────────┬─────────────────────────────────────────┘   │
-│                              │  AggregateRecords + rolling history          │
-│               ┌──────────────┴──────────────┐                              │
-│               ▼                             ▼                              │
-│  ┌────────────────────────┐   ┌──────────────────────────┐                 │
-│  │  Pattern Detector      │   │  Predictive Module       │                 │
-│  │  (reactive)            │   │  (proactive)             │                 │
-│  │  • high_frequency      │   │  • rate_increase         │                 │
-│  │  • repeated_identical  │   │  • upward_trend          │                 │
-│  │  • spike               │   │  • repeated_failures     │                 │
-│  │  • failure_ratio       │   │  → potential_outage (P1) │                 │
-│  └────────────┬───────────┘   └─────────────┬────────────┘                 │
-│               │    ↑ reads thresholds        │    ↑ reads thresholds        │
-│               │    └──────────────┐          │    ┘                        │
-│               │          ┌────────┴──────────┐                             │
-│               │          │   RulesStore      │◀── Admin API (live updates) │
-│               │          │   (SQLite +       │    PUT/PATCH/DELETE          │
-│               │          │    TTL cache)     │    /admin/rules/...          │
-│               │          │   Global defaults │                             │
-│               │          │   → Service rules │                             │
-│               │          │   → Endpoint rules│                             │
-│               │          └───────────────────┘                             │
-│               └──────────────────┬───────────────────────────────────────  │
-│                                  │  AlertEvents                            │
-│                                  │  (severity = f(count, pattern_type))   │
-└──────────────────────────────────┼──────────────────────────────────────────┘
-                                   │
-                                   ▼
+           │ read events                          │ GET {health_check_url}
+           │ (last N min)                         │ per service in registry
+           │                                      │
+           │  APScheduler / 60s                   │  APScheduler / 60s
+           ▼                                      ▼
+┌──────────────────────────────┐   ┌──────────────────────────────────────────┐
+│  AGGREGATION & PROCESSING    │   │          HEALTH CHECK LAYER              │
+│                              │   │                                          │
+│  ┌────────────────────────┐  │   │  ┌────────────────────────────────────┐  │
+│  │  Aggregator            │  │   │  │  HealthChecker                     │  │
+│  │  • service-level       │  │   │  │                                    │  │
+│  │  • endpoint-level      │  │   │  │  2xx response                      │  │
+│  └──────────┬─────────────┘  │   │  │    → consecutive_failures = 0      │  │
+│             │ AggregateRecs  │   │  │    → healthy, no alert             │  │
+│         ┌───┴───┐            │   │  │                                    │  │
+│         ▼       ▼            │   │  │  non-2xx / timeout / conn refused  │  │
+│  ┌──────────┐ ┌──────────┐   │   │  │    → consecutive_failures += 1     │  │
+│  │ Pattern  │ │Predictive│   │   │  │    → persisted in health_check_    │  │
+│  │ Detector │ │ Module   │   │   │  │      state table (SQLite)          │  │
+│  │(reactive)│ │(proactive│   │   │  │                                    │  │
+│  │• hi_freq │ │• rate↑   │   │   │  │  failures < threshold (default 3)  │  │
+│  │• repeat  │ │• trend↑  │   │   │  │    → suppressed (transient blip)   │  │
+│  │• spike   │ │• fail↑   │   │   │  │                                    │  │
+│  │• ratio   │ │→ P_OUTAGE│   │   │  │  failures ≥ threshold              │  │
+│  └────┬─────┘ └────┬─────┘   │   │  │    → SERVICE_UNREACHABLE           │  │
+│       │ ↑reads     │         │   │  │      AlertEvent                    │  │
+│       │ └──┐        │         │   │  │      severity = service criticality│  │
+│       │  ┌─┴────────┴──────┐  │   │  └────────────────────┬───────────────┘  │
+│       │  │   RulesStore    │◀─┼───┼── Admin API           │               │
+│       │  │   (SQLite +     │  │   │   /admin/rules/...     │               │
+│       │  │    TTL cache)   │  │   │   /admin/health-check/ │               │
+│       │  │  global→service │  │   └───────────────────────┼───────────────┘
+│       │  │  →endpoint rules│  │                           │
+│       │  └─────────────────┘  │                           │ AlertEvents
+│       └──────────┬────────────┘                           │
+│                  │ AlertEvents                             │
+│     (severity = f(count, pattern_type))                   │
+└──────────────────┼────────────────────────────────────────┘
+                   │                                         │
+                   └─────────────────┬───────────────────────┘
+                                     │ AlertEvents
+                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            ALERTING LAYER                                    │
 │                                                                             │
@@ -89,10 +90,10 @@ A prototype monitoring system for AdvisoryAI that captures errors from multiple 
 │  │    (svc+ep+pattern    │  │    (technical detail)│  │  • Email        │  │
 │  │     +message[:64])    │  │  • Business copy     │  │  • Console      │  │
 │  │  • cooldown window    │  │    (user impact)     │  │  retry/backoff  │  │
-│  │  • re-alert on worsen │  └──────────────────────┘  └─────────────────┘  │
-│  │  • RESOLVED after N   │                                                 │
-│  │    clean windows      │                                                 │
-│  └───────────────────────┘                                                 │
+│  │  • re-alert on worsen │  │  Handles all pattern │  └─────────────────┘  │
+│  │  • RESOLVED after N   │  │  types including     │                       │
+│  │    clean windows      │  │  SERVICE_UNREACHABLE │                       │
+│  └───────────────────────┘  └──────────────────────┘                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -194,6 +195,7 @@ python3 -c "import sqlite3; c=sqlite3.connect('monitoring.db'); c.execute('DELET
 | Recovery | `--scenario recovery` | 20 errors then silence — alerts fire then resolve | `high_frequency` → `RESOLVED` after 2 clean ticks |
 | Custom threshold | `--scenario custom_threshold` | Lowers `high_frequency_threshold` from 15 → 5 via Admin API, sends 8 errors — only fires because of the custom rule | `high_frequency` + `repeated_identical` at threshold=5 |
 | Predictive | `--scenario predictive` | 3 batches (3 → 8 → 20 errors) with a 65s pause between each so the scheduler builds history | `potential_outage` (predictive) |
+| Health check | `--scenario health_check` | Pre-seeds 2 failures, waits one tick (≤65s), 3rd failure fires `SERVICE_UNREACHABLE` | `service_unreachable` P0 for `atlas-api` |
 | All (quick) | `--scenario all` | Runs all except predictive back-to-back | All of the above |
 
 ---
@@ -285,6 +287,78 @@ python3 scripts/simulate_errors.py --scenario predictive
 # Engineering: [WARNING] [P1] POTENTIAL OUTAGE RISK ...
 ```
 
+**8. Health check — active service polling (live end-to-end test, ~70s)**
+
+The registered `health_check_url` values (e.g. `http://atlas-api/health`) are internal hostnames that don't resolve in a local dev environment, so every health-check tick naturally fails with "Connection refused". The scenario exploits this: it pre-seeds 2 consecutive failures so the very next tick pushes the count to the alert threshold without waiting 3 full intervals.
+
+```bash
+# No DB clear needed — health_check_state is separate from error events
+python3 scripts/simulate_errors.py --scenario health_check
+```
+
+**What the script does automatically:**
+
+```
+[1/5] DELETE /admin/health-check/state/atlas-api
+        → resets consecutive_failures = 0
+
+[2/5] POST /admin/health-check/seed/atlas-api  { consecutive_failures: 2 }
+        → writes failures=2 into health_check_state (simulates 2 past failed ticks)
+
+[3/5] GET /admin/health-check/state
+        → confirms  atlas-api  failures=2  last_error="Connection refused (test)"
+
+[4/5] Wait ≤65s for next health-check tick...
+        APScheduler fires health_check_tick()
+        → GET http://atlas-api/health  →  Connection refused
+        → DB: consecutive_failures = 2 + 1 = 3  (reached threshold)
+        → SERVICE_UNREACHABLE AlertEvent emitted  →  alerting pipeline runs
+
+[5/5] GET /admin/health-check/state
+        → confirms  atlas-api  failures=3  🔴 UNREACHABLE
+```
+
+**Expected server log output:**
+
+```
+[WARNING] Health check FAILED: service=atlas-api url=http://atlas-api/health
+                               error=Connection refused consecutive=3/3
+[WARNING] SERVICE_UNREACHABLE alert: service=atlas-api consecutive=3 severity=P0
+[ALERT P0]
+  Engineering: [P0] SERVICE UNREACHABLE: atlas-api.
+               Health check failed — Connection refused (down for 3 consecutive checks).
+  Business:    Atlas api is currently unavailable. … Our team has been alerted.
+```
+
+**Why 3 consecutive failures before alerting?**
+
+A single failed health check could be a transient network blip. The threshold (`HEALTH_CHECK_CONSECUTIVE_FAILURES`, default 3) ensures only a sustained outage triggers an alert. The real detection window is `HEALTH_CHECK_CONSECUTIVE_FAILURES × HEALTH_CHECK_INTERVAL_SECONDS` = **3 × 60s = 3 minutes**.
+
+**Recovery path:**
+
+```bash
+# Simulate service coming back online — reset the failure counter
+curl -X DELETE http://localhost:8000/admin/health-check/state/atlas-api
+
+# After DEFAULT_RESOLVED_CLEAN_WINDOWS clean ticks the noise reducer
+# automatically fires a RESOLVED notification.
+```
+
+**Useful admin endpoints for manual inspection:**
+
+```bash
+# See current failure counts for all services
+curl http://localhost:8000/admin/health-check/state
+
+# Reset a single service
+curl -X DELETE http://localhost:8000/admin/health-check/state/atlas-api
+
+# Pre-seed N failures (test helper)
+curl -X POST http://localhost:8000/admin/health-check/seed/atlas-api \
+  -H "Content-Type: application/json" \
+  -d '{"consecutive_failures": 2, "error": "Connection refused (test)"}'
+```
+
 > **Note on cooldowns:** If you run scenarios back-to-back without clearing the DB, the noise reducer's in-memory incident state may suppress re-alerts during the cooldown window (default 15 min). Always clear the DB between isolated scenario runs for a clean result.
 
 ---
@@ -296,9 +370,48 @@ python3 scripts/simulate_errors.py --scenario predictive
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/errors` | Ingest an error event |
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Health check of the monitoring server itself |
 | `GET` | `/status` | Active incidents and recent alerts |
 | `GET` | `/adapters` | List supported client types |
+
+### Health polling (outbound)
+
+The monitoring service itself polls each registered service's `health_check_url` on a background APScheduler job (interval: `HEALTH_CHECK_INTERVAL_SECONDS`, default 60s). There is no inbound endpoint for this — it is purely outbound.
+
+To register a service for health polling, add a `health_check_url` key to its entry in `config/service_registry.py`:
+
+```python
+"atlas-api": {
+    "criticality": "P0",
+    "health_check_url": "http://atlas-api/health",   # ← add this
+    "rules": { ... },
+}
+```
+
+Severity of the resulting `SERVICE_UNREACHABLE` alert maps directly from the service's `criticality` (P0 service → P0 alert, P1 → P1, P2 → P2).
+
+**Consecutive-failure threshold (`HEALTH_CHECK_CONSECUTIVE_FAILURES`, default 3)**
+
+A single failed health check is not enough to trigger an alert. The checker increments a per-service counter (persisted in `health_check_state` in `monitoring.db`) on every failure and resets it on recovery:
+
+```
+Tick 1: atlas-api → Connection refused   consecutive=1/3  → suppressed (below threshold)
+Tick 2: atlas-api → Connection refused   consecutive=2/3  → suppressed
+Tick 3: atlas-api → Connection refused   consecutive=3/3  → SERVICE_UNREACHABLE alert fired ✓
+Tick 4: atlas-api → Connection refused   consecutive=4/3  → alert again (noise reducer cooldown applies)
+Tick 5: atlas-api → 200 OK               consecutive=0    → recovered; incident resolves after N clean ticks
+```
+
+Because counts are stored in SQLite, they survive server restarts — no gap in detection after a deploy.
+
+**Health-check admin endpoints:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/admin/health-check/state` | All services with current `consecutive_failures`, `last_checked_at`, `last_error` |
+| `GET` | `/admin/health-check/state/{service}` | Single service health-check state |
+| `DELETE` | `/admin/health-check/state/{service}` | Reset `consecutive_failures` to 0 (simulate recovery) |
+| `POST` | `/admin/health-check/seed/{service}` | Pre-seed N failures (test helper — simulates N past failed ticks) |
 
 **POST /errors — headers:**
 

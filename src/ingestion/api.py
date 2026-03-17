@@ -156,3 +156,5 @@ async def list_adapters() -> dict:
         "default": "canonical",
         "custom_field_map_header": "X-Field-Map (JSON object, for custom type only)",
     }
+
+

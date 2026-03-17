@@ -15,6 +15,8 @@ Scenarios:
     recovery         – errors that spike then stop (triggers "resolved")
     custom_threshold – configure low threshold via Admin API, send fewer errors,
                        verify alert fires at custom level not the default
+    health_check     – show current health-check status and how to trigger a
+                       SERVICE_UNREACHABLE alert by pointing a service at a bad URL
 """
 from __future__ import annotations
 
@@ -294,6 +296,100 @@ def scenario_custom_threshold(host: str) -> None:
     print("Check server logs — alert should show: threshold=5, not threshold=15.")
 
 
+def scenario_health_check(host: str) -> None:
+    """
+    Live end-to-end test for the SERVICE_UNREACHABLE alert flow.
+
+    Strategy:
+      The registered health_check_urls (e.g. http://atlas-api/health) are internal
+      hostnames that don't exist in a local dev environment, so every health-check
+      tick will fail with "Connection refused".
+
+      Rather than waiting 3 full ticks (3 × 60s = 3 min), this scenario:
+        1. Resets health_check_state for atlas-api via the admin API
+        2. Pre-seeds 2 consecutive failures via POST /admin/health-check/seed/atlas-api
+        3. Waits for the next health-check tick (≤ 65s)
+        4. That tick adds a 3rd failure → SERVICE_UNREACHABLE alert fires
+        5. Shows the state after the alert
+        6. Resets state to demonstrate recovery path
+    """
+    SERVICE = "atlas-api"
+    THRESHOLD = 3  # HEALTH_CHECK_CONSECUTIVE_FAILURES default
+
+    print("\n── Scenario: HEALTH CHECK (active polling) ──────────────────────────")
+
+    # ── Step 1: reset any stale state ─────────────────────────────────────────
+    print(f"\n[1/5] Resetting health_check_state for {SERVICE}…")
+    try:
+        r = httpx.delete(
+            f"{host}/admin/health-check/state/{SERVICE}",
+            headers=HEADERS, timeout=5,
+        )
+        print(f"  ✓ Reset: {r.json()}")
+    except Exception as exc:
+        print(f"  ✗ Could not reach server: {exc}")
+        return
+
+    # ── Step 2: pre-seed 2 failures (threshold-1) ─────────────────────────────
+    print(f"\n[2/5] Pre-seeding {THRESHOLD - 1} consecutive failures for {SERVICE}…")
+    r = httpx.post(
+        f"{host}/admin/health-check/seed/{SERVICE}",
+        json={"consecutive_failures": THRESHOLD - 1, "error": "Connection refused (test)"},
+        headers=HEADERS, timeout=5,
+    )
+    print(f"  ✓ Seeded: {r.json()}")
+
+    # ── Step 3: show current state ─────────────────────────────────────────────
+    print("\n[3/5] Current health_check_state (before next tick):")
+    r = httpx.get(f"{host}/admin/health-check/state", headers=HEADERS, timeout=5)
+    for row in r.json():
+        if row["service"] == SERVICE:
+            print(
+                f"  {row['service']:30s}  failures={row['consecutive_failures']}  "
+                f"last_error={row['last_error']}"
+            )
+
+    # ── Step 4: wait for the next health-check tick ────────────────────────────
+    print(
+        f"\n[4/5] Waiting ≤65s for the next health-check tick…\n"
+        f"      The tick will poll http://atlas-api/health → Connection refused\n"
+        f"      consecutive_failures will become {THRESHOLD} → alert fires.\n"
+        f"\n      Watch server logs for:\n"
+        f"        Health check FAILED: service=atlas-api … consecutive={THRESHOLD}/{THRESHOLD}\n"
+        f"        SERVICE_UNREACHABLE alert: service=atlas-api severity=P0\n"
+        f"        [ALERT P0] SERVICE UNREACHABLE: atlas-api …"
+    )
+
+    for remaining in range(65, 0, -5):
+        print(f"  … {remaining}s remaining", end="\r", flush=True)
+        time.sleep(5)
+    print()
+
+    # ── Step 5: show state after tick ─────────────────────────────────────────
+    print("\n[5/5] Health_check_state after tick:")
+    r = httpx.get(f"{host}/admin/health-check/state", headers=HEADERS, timeout=5)
+    for row in r.json():
+        if row["service"] == SERVICE:
+            failures = row["consecutive_failures"]
+            status_str = "🔴 UNREACHABLE (alert should have fired)" if failures >= THRESHOLD else "🟡 below threshold"
+            print(
+                f"  {row['service']:30s}  failures={failures}  "
+                f"last_checked={row['last_checked_at']}  → {status_str}"
+            )
+
+    # ── Recovery demonstration ─────────────────────────────────────────────────
+    print(
+        "\n── Recovery path ────────────────────────────────────────────────────────\n"
+        f"  When atlas-api's health endpoint starts returning 2xx:\n"
+        f"  - HealthChecker resets consecutive_failures = 0 in DB\n"
+        f"  - No more SERVICE_UNREACHABLE events emitted\n"
+        f"  - Noise reducer's clean-window counter increments each tick\n"
+        f"  - After DEFAULT_RESOLVED_CLEAN_WINDOWS clean ticks → RESOLVED alert\n"
+        f"\n  Simulate recovery now by resetting state:\n"
+        f"    curl -X DELETE {host}/admin/health-check/state/{SERVICE}\n"
+    )
+
+
 def scenario_all(host: str) -> None:
     """
     Runs all quick scenarios back-to-back.
@@ -326,6 +422,7 @@ SCENARIOS = {
     "ratio": scenario_failure_ratio,
     "recovery": scenario_recovery,
     "custom_threshold": scenario_custom_threshold,
+    "health_check": scenario_health_check,
 }
 
 

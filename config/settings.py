@@ -89,6 +89,17 @@ FAILURE_RATIO_MIN_SEVERITY = "P1"
 # Predictive / potential_outage: always P1 (warning, not critical yet)
 PREDICTIVE_SEVERITY = "P1"
 
+# ── Health polling ────────────────────────────────────────────────────────────
+# How often (seconds) the health checker polls each registered service
+HEALTH_CHECK_INTERVAL_SECONDS = _int("HEALTH_CHECK_INTERVAL_SECONDS", 60)
+
+# HTTP timeout (seconds) for each health poll request
+HEALTH_CHECK_TIMEOUT_SECONDS = _float("HEALTH_CHECK_TIMEOUT_SECONDS", 5.0)
+
+# Number of consecutive failed health checks before a SERVICE_UNREACHABLE alert
+# is raised. Prevents alerts from transient single-tick network blips.
+HEALTH_CHECK_CONSECUTIVE_FAILURES = _int("HEALTH_CHECK_CONSECUTIVE_FAILURES", 3)
+
 # ── Alerting / noise-reduction ────────────────────────────────────────────────
 # Minimum minutes before the same alert key can fire again
 DEFAULT_ALERT_COOLDOWN_MINUTES = _int("DEFAULT_ALERT_COOLDOWN_MINUTES", 15)

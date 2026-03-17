@@ -34,6 +34,7 @@ _FRIENDLY_PATTERN: dict[PatternType, str] = {
     PatternType.SPIKE: "sudden spike in errors",
     PatternType.POTENTIAL_OUTAGE: "potential outage risk",
     PatternType.FAILURE_RATIO: "high failure rate",
+    PatternType.SERVICE_UNREACHABLE: "service unreachable",
 }
 
 _BUSINESS_IMPACT: dict[str, str] = {
@@ -61,6 +62,11 @@ def build_messages(
     if event.message == "__resolved__":
         eng, biz = _build_resolved(event)
         logger.debug("Built RESOLVED messages: service=%s endpoint=%s", event.service, event.endpoint)
+        return eng, biz
+
+    if event.pattern_type == PatternType.SERVICE_UNREACHABLE:
+        eng, biz = _build_unreachable(event, incident_status)
+        logger.debug("Built SERVICE_UNREACHABLE messages: service=%s error=%s", event.service, event.message)
         return eng, biz
 
     engineering = _build_engineering(event, incident_status)
@@ -142,6 +148,25 @@ def _build_business(event: AlertEvent, status: IncidentStatus) -> str:
         f"{impact} "
         f"Our team is investigating and working to resolve this as quickly as possible."
     )
+
+
+def _build_unreachable(event: AlertEvent, status: IncidentStatus) -> Tuple[str, str]:
+    svc = event.service
+    friendly = _FRIENDLY_SERVICE_NAMES.get(svc, svc)
+    impact = _BUSINESS_IMPACT.get(svc, _DEFAULT_BUSINESS_IMPACT)
+    error = event.message or "health check failed"
+
+    prefix = "[WORSENED] " if status == IncidentStatus.WORSENED else ""
+    eng = (
+        f"{prefix}[{event.severity}] SERVICE UNREACHABLE: {svc}. "
+        f"Health check failed — {error}."
+    )
+    biz = (
+        f"{friendly.capitalize()} is currently unavailable. "
+        f"{impact} "
+        f"Our team has been alerted and is investigating."
+    )
+    return eng, biz
 
 
 def _build_resolved(event: AlertEvent) -> Tuple[str, str]:
